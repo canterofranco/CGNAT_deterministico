@@ -156,7 +156,7 @@
             # Regla TCP con control de puertos
             /ip firewall nat add \
                 chain="cgnat-c-$blockNum2-$clientNum" \
-                action=netmap \
+                action=scr-nat \
                 protocol=tcp \
                 src-address="$privIP" \
                 to-addresses="$pubIP" \
@@ -167,7 +167,7 @@
             # Regla UDP con control de puertos
             /ip firewall nat add \
                 chain="cgnat-c-$blockNum2-$clientNum" \
-                action=netmap \
+                action=scr-nat \
                 protocol=udp \
                 src-address="$privIP" \
                 to-addresses="$pubIP" \

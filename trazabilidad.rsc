@@ -1,42 +1,55 @@
 ########################################
-# CGNAT Determinístico - Parámetros
+# CGNAT Determinístico
+# Parámetros ajustables
 ########################################
-:local TotalClients 200
-:local FirstPublicIP 8
-:local PublicBase "200.43.43"
-:local PrivateBase "100.76"
-:local ClientsPerPublicIP 32
-:local PortsPerClient 2000
-:local StartingPort 1024
-:local OutInterfaceList "mi-wan"
+:local TotalClients    200
+:local FirstPublicIP   8
+:local PublicBase      "200.43.43"
+:local PrivateBase     "100.76"
+:local ClientsPerPubIP 32
+:local PortsPerClient  2000
+:local StartingPort    1024
+:local OutIfList       "mi-wan"
 
-########################################
-# Delays (ajustables según carga)
-########################################
-:local delay_entre_reglas 20ms
+:local delay_entre_reglas  20ms
 :local delay_entre_clientes 50ms
-:local delay_entre_bloques 2s
+:local delay_entre_bloques  2s
 
 ########################################
-# Cálculo automático
+# Validación de overflow de puertos
 ########################################
-:local totalPublicIPs (($TotalClients + $ClientsPerPublicIP - 1) / $ClientsPerPublicIP)
+:if (($StartingPort + ($ClientsPerPubIP * $PortsPerClient) - 1) > 65535) do={
+    :error "ERROR: overflow de puertos. Reducí ClientsPerPubIP o PortsPerClient."
+}
+
+########################################
+# Cálculo automático de bloques
+########################################
+:local totalBlocks (($TotalClients + $ClientsPerPubIP - 1) / $ClientsPerPubIP)
 
 :local privOctet3 0
 :local privOctet4 1
 :local currentPublicIP $FirstPublicIP
 :local blockNum 1
 
-:for block from=1 to=$totalPublicIPs do={
+:for block from=1 to=$totalBlocks do={
 
-    :local clientsThisBlock $ClientsPerPublicIP
-    :local processed (($block - 1) * $ClientsPerPublicIP)
+    # Clientes en este bloque
+    :local clientsThisBlock $ClientsPerPubIP
+    :local processed (($block - 1) * $ClientsPerPubIP)
     :local remaining ($TotalClients - $processed)
-    :if ($remaining < $ClientsPerPublicIP) do={
+    :if ($remaining < $ClientsPerPubIP) do={
         :set clientsThisBlock $remaining
     }
 
+    # Validar que quedan IPs públicas
+    :if ($currentPublicIP < 1) do={
+        :error "ERROR: IPs publicas agotadas en bloque $blockNum"
+    }
+
     :local pubAddr "$PublicBase.$currentPublicIP"
+
+    # Calcular rango privado del bloque
     :local privStart "$PrivateBase.$privOctet3.$privOctet4"
     :local endOctet4 ($privOctet4 + $clientsThisBlock - 1)
     :local endOctet3 $privOctet3
@@ -48,12 +61,13 @@
 
     :log info "Bloque $blockNum: $privStart-$privEnd -> $pubAddr ($clientsThisBlock clientes)"
 
+    # Jump principal srcnat -> cgnat-block-N
     /ip firewall nat add \
         chain=srcnat \
         action=jump \
-        jump-target="clients-$blockNum" \
+        jump-target="cgnat-block-$blockNum" \
         src-address="$privStart-$privEnd" \
-        out-interface-list=$OutInterfaceList \
+        out-interface-list=$OutIfList \
         comment="CGNAT-bloque-$blockNum"
 
     :delay $delay_entre_reglas
@@ -64,41 +78,57 @@
         :local clientAddr "$PrivateBase.$privOctet3.$privOctet4"
         :local portEnd ($currentPort + $PortsPerClient - 1)
 
+        # Jump cgnat-block-N -> cgnat-c-N-C
         /ip firewall nat add \
-            chain="clients-$blockNum" \
+            chain="cgnat-block-$blockNum" \
             action=jump \
-            jump-target="client-$blockNum-$c" \
+            jump-target="cgnat-c-$blockNum-$c" \
             src-address="$clientAddr" \
             comment="CGNAT-cliente-$blockNum-$c"
 
         :delay $delay_entre_reglas
 
+        # Regla TCP
         /ip firewall nat add \
-            chain="client-$blockNum-$c" \
+            chain="cgnat-c-$blockNum-$c" \
             action=src-nat \
             protocol=tcp \
             src-address="$clientAddr" \
             to-address="$pubAddr" \
             to-ports="$currentPort-$portEnd" \
-            out-interface-list=$OutInterfaceList \
+            out-interface-list=$OutIfList \
             comment="CGNAT-$clientAddr-tcp"
 
         :delay $delay_entre_reglas
 
+        # Regla UDP
         /ip firewall nat add \
-            chain="client-$blockNum-$c" \
+            chain="cgnat-c-$blockNum-$c" \
             action=src-nat \
             protocol=udp \
             src-address="$clientAddr" \
             to-address="$pubAddr" \
             to-ports="$currentPort-$portEnd" \
-            out-interface-list=$OutInterfaceList \
+            out-interface-list=$OutIfList \
             comment="CGNAT-$clientAddr-udp"
+
+        :delay $delay_entre_reglas
+
+        # Regla fallback — ICMP, GRE, ESP, AH y otros
+        /ip firewall nat add \
+            chain="cgnat-c-$blockNum-$c" \
+            action=src-nat \
+            src-address="$clientAddr" \
+            to-address="$pubAddr" \
+            out-interface-list=$OutIfList \
+            comment="CGNAT-$clientAddr-otros"
 
         :delay $delay_entre_clientes
 
+        # Avanzar puerto
         :set currentPort ($currentPort + $PortsPerClient)
 
+        # Avanzar IP privada
         :set privOctet4 ($privOctet4 + 1)
         :if ($privOctet4 > 254) do={
             :set privOctet4 1
@@ -106,10 +136,11 @@
         }
     }
 
+    # Avanzar IP pública descendente
     :set currentPublicIP ($currentPublicIP - 1)
     :set blockNum ($blockNum + 1)
 
     :delay $delay_entre_bloques
 }
 
-:log info "CGNAT completado: $TotalClients clientes procesados"
+:log info "CGNAT completado: $TotalClients clientes, $totalBlocks bloques."

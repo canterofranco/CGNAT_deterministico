@@ -8,6 +8,7 @@
 
 :foreach r in=$rules do={
     /ip firewall nat remove $r
+    :delay 10ms
     :set count ($count + 1)
     :if (($count % 100) = 0) do={
         :log info "Progreso: $count de $total..."
